@@ -108,7 +108,7 @@ tx_notifier_hook(struct notifier_block *nb, unsigned long val, void *v)
 #endif
 
 ToDevice::ToDevice()
-    : _q(0), _no_pad(false)
+    : _q(0), _no_pad(false), _ip_only(false)
 {
 }
 
@@ -120,6 +120,7 @@ ToDevice::~ToDevice()
 int
 ToDevice::configure(Vector<String> &conf, ErrorHandler *errh)
 {
+    String type = String::make_stable("ETHER");
     _burst = 16;
     int tx_queue = 0;
     if (AnyDevice::configure_keywords(conf, errh, false) < 0
@@ -128,6 +129,7 @@ ToDevice::configure(Vector<String> &conf, ErrorHandler *errh)
 	    .read_p("BURST", _burst)
 	    .read("NO_PAD", _no_pad)
 	    .read("QUEUE", tx_queue)
+	    .read("TYPE", WordArg(), type)
 	    .complete() < 0))
 	return -1;
 #if !HAVE_NETDEV_GET_TX_QUEUE
@@ -146,6 +148,15 @@ ToDevice::configure(Vector<String> &conf, ErrorHandler *errh)
 	    return errh->error("device %<%s%> has only %d queues", _devname.c_str(), _tx_queue);
     }
 #endif
+    // set type
+    if (type == "IP")
+        _ip_only = true;
+    else if (type == "ETHER")
+        _ip_only = false;
+    else {
+	dev_put(dev);
+        return errh->error("bad TYPE");
+    }
     set_device(dev, &to_device_map, 0);
     return errh->nerrors() ? -1 : 0;
 }
@@ -487,11 +498,19 @@ ToDevice::queue_packet(Packet *p, struct netdev_queue *txq)
     struct net_device *dev = _dev;
 
     /*
+     * Set correct protocol for IP only devices
+     */
+    if (_ip_only) {
+        skb1->protocol = htons(ETH_P_IP);
+    }
+
+    /*
      * Ensure minimum ethernet packet size (14 hdr + 46 data).
      * I can't figure out where Linux does this, so I don't
      * know the correct procedure.
      */
-    int need_tail = 60 - p->length();
+    unsigned min_size = _ip_only ? 46 : 60;
+    int need_tail = min_size - p->length();
 
     if (!_no_pad && need_tail > 0) {
 	if (skb_tailroom(skb1) < need_tail) {
